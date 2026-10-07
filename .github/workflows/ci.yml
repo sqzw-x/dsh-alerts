@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 runs the published bundle; the newer lines run the TypeScript toolchain.
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: 产物契约（加载壳 + 导出）
+        run: node -e "const s=require('node:fs').readFileSync('lib/client.js','utf8'); if(!s.startsWith('window.__ModuleLoader__.load({')) throw new Error('bundle 缺少 __ModuleLoader__ 包装'); if(!/exports\.apply = apply;/.test(s)) throw new Error('bundle 未导出 apply');"

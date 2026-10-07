@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Alerts",
+    "description": "Approvals, questions, plan reviews and finished replies arrive as one kind of alert: the conversation on screen alerts once it loses focus, background conversations always, subagents never."
+  }
+}
