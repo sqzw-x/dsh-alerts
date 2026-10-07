@@ -1,5 +1,7 @@
 # dsh-alerts
 
+[![CI](https://github.com/sqzw-x/dsh-alerts/actions/workflows/ci.yml/badge.svg)](https://github.com/sqzw-x/dsh-alerts/actions/workflows/ci.yml)
+
 [English](README.en.md) | 中文
 
 给 DeepSeek Harness 的通知插件：**审批、提问、方案确认、回复完成，统一当成一种提醒推送**，只按「窗口有没有焦点」和「事件属于哪个会话」决定弹不弹。

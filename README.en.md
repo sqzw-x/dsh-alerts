@@ -1,5 +1,7 @@
 # dsh-alerts
 
+[![CI](https://github.com/sqzw-x/dsh-alerts/actions/workflows/ci.yml/badge.svg)](https://github.com/sqzw-x/dsh-alerts/actions/workflows/ci.yml)
+
 English | [中文](README.md)
 
 Focus-aware notifications for DeepSeek Harness: **approvals, questions, plan reviews and finished replies all arrive as one kind of alert**, gated only by window focus and by which conversation the event belongs to.
