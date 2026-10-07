@@ -51,6 +51,14 @@ Two read-only stores: `uiSession.sessionStatus` (`running`, `pendingInteraction`
 
 Clicking a notification raises the window (the `dsh://open` deep link on the desktop, `window.focus()` in a browser) and switches to that conversation. Notifications are never auto-closed — the platform style decides how long they stay.
 
+## Development
+
+Node 22+ (toolchain only — the shipped bundle runs in the browser).
+
+```sh
+npm install && npm test
+```
+
 ## License
 
 MIT

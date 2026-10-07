@@ -90,6 +90,8 @@ __dshAlerts.test()                        // 绕过规则立刻发一条，验�
 
 ## 开发
 
+需要 Node 22+（构建工具链的要求；产物本身只跑在浏览器里）。
+
 ```sh
 npm install
 npm run build      # tsdown → lib/{index,client,engine}.js

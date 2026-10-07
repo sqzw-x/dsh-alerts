@@ -11,8 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 18 runs the published bundle; the newer lines run the TypeScript toolchain.
-        node: [20, 22, 24]
+        # 工具链（tsdown/unrun）需要 Node 22+；产物本身跑在浏览器里，与 Node 版本无关。
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
