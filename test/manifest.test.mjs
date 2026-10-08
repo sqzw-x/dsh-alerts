@@ -29,6 +29,13 @@ test('bundle 补丁存在，且插入的就是本插件的条目', () => {
 test('客户端声明：web 平台、声明注入的宿主包、入口指向构建产物', () => {
   assert.equal(pkg.dsh?.client?.platform, 'web')
   assert.ok(Array.isArray(pkg.dsh?.client?.inject) && pkg.dsh.client.inject.length > 0)
+  // 一条边一个用途：ui-session 提供被观察的 sessionStatus，ui-workspace 提供点击
+  // 通知时要用的 `uiWorkspace.openSession`。两条都只是模块装载/预取元数据，不参与
+  // apply 排序（见 dsh-client-modules 的 graph row），因此这里只钉住"别被删掉"。
+  assert.ok(
+    pkg.dsh.client.inject.some((name) => name.includes('ui-workspace')),
+    'dsh.client.inject 要带上 ui-workspace：导航服务由它提供'
+  )
   assert.equal(pkg.exports['./client'], './lib/client.js')
 })
 

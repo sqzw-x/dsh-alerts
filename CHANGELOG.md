@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.1] — 2026-10-08
+
+### 修复
+
+- **点击通知切不过去会话**（0.1.0 起就有的老 bug）：宿主发布导航能力时给的是**服务实例上的原型方法**（`ctx.uiWorkspace.openSession`），插件却把它当普通函数取出来调用 —— 接收者 `this` 丢了，方法内部在 `this.replaceMain(...)` 上抛 `TypeError`；而点击处理器把异常整个吞掉，于是窗口抬起来了、会话一直没切，控制台也不留痕迹。
+  - 导航服务现在**绑到实例**后调用（`uiWorkspace.openSession` 与旧的 `sessions.open` 都走这条路）。
+  - 导航失败**不再静默**：计入 `debug().counters.failed` 并打一条 `console.warn`。
+  - `debug()` 新增 `navigation` 字段，直接告诉你点击会走哪个服务：`uiWorkspace.openSession` / `sessions.open` / `none`。
+  - 新增 `__dshAlerts.open(sessionId?)`：按 id 切会话（缺省切当前会话），用来单独验点击路径。
+  - `dsh.client.inject` 补上 `@deepseek-ai/dsh-client-ui-workspace` —— 导航服务就是它提供的。
+
+### 测试
+
+- 测试宿主改成**照着真实宿主的样子**造：`sessions` 没有 `open()`（`ISessions` 本来就没有），`uiWorkspace.openSession` 是带 `this` 的原型方法。之前那个假宿主用的是箭头函数，所以这组用例在 bug 面前全绿。
+- 新增 `test/host.test.mjs`：把插件作为**真正的 cordis fiber**（真的 `inject`、真的 `Service` 实例）挂在真 `Context` 上跑，确认没注入的服务也能 `get()` 到、点击时接收者不丢。
+- 上面两组用例在旧代码上全红，改完才绿。
+
+### 清理
+
+- 删掉 `debug().counters.withheld`：这个计数器从 0.1.0 起就是个摆设，声明了却从来没有累加过，永远显示 0 —— 一个会说谎的字段比没有更误导人。想看"哪些等待没送出去"，用 `debug().openWaits` 与 `deliveredKeys` 的差集，那本来就是逐条的、信息更全。
+- 删掉 `client.ts` 里一个没用到的局部绑定。
+
 ## [0.2.0] — 2026-10-08
 
 ### 行为

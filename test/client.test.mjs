@@ -102,6 +102,71 @@ test('点击通知：抬窗 + 切到该会话 + 关掉通知', () => {
   assert.deepEqual(host.opened, ['s-other'], '切到提醒的那个会话')
   assert.equal(host.iframes[0]?.src, 'dsh://open', '桌面端发 dsh:// 深链')
   assert.equal(notification.closed, true, '点完关掉通知')
+  assert.equal(host.api.debug().counters.failed, 0, '这次导航不该记失败')
+  assert.equal(host.api.debug().navigation, 'uiWorkspace.openSession', '真实宿主只有这条路')
+})
+
+test('点击通知：导航服务是带 this 的原型方法，调用时不能丢接收者', () => {
+  // 回归：宿主把 `sessions.open` / `uiWorkspace.openSession` 交出来时是实例上的
+  // 原型方法，脱离实例调用会在 `this` 上抛错，而点击处理器把异常吞掉了 ——
+  // 于是窗口抬起来了，会话却一直没切过去。
+  const host = makeHost({ focused: false })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:receiver') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  host.last().onclick()
+  assert.deepEqual(host.opened, ['s-other'], 'uiWorkspace 实例收到了导航请求')
+  assert.equal(host.api.debug().counters.failed, 0)
+})
+
+test('点击通知：宿主只提供旧的 sessions.open 时也走通', () => {
+  const host = makeHost({ focused: false, navigation: 'sessions' })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:legacy') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  host.last().onclick()
+  assert.deepEqual(host.opened, ['s-other'])
+  assert.equal(host.api.debug().navigation, 'sessions.open')
+})
+
+test('导航抛错：记账、仍然关掉通知，不把点击整个吞掉', () => {
+  const host = makeHost({ focused: false, navigation: 'throwing' })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:boom') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  const notification = host.last()
+  notification.onclick()
+  assert.deepEqual(host.opened, [], '宿主拒绝了这次导航')
+  assert.equal(host.api.debug().counters.failed, 1, '失败要能被 debug() 看见')
+  assert.equal(notification.closed, true, '点击还是要收掉通知')
+})
+
+test('宿主没有导航服务：点击只抬窗，debug() 说明原因', () => {
+  const host = makeHost({ focused: false, navigation: 'none' })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:nowhere') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  const notification = host.last()
+  notification.onclick()
+  assert.deepEqual(host.opened, [])
+  assert.equal(host.api.debug().navigation, 'none')
+  assert.equal(notification.closed, true)
+})
+
+test('__dshAlerts.open(id)：按 id 直接切会话，缺省切当前会话', () => {
+  const host = makeHost({ focused: true })
+  assert.equal(host.api.open('s-other'), 'opened')
+  assert.deepEqual(host.opened, ['s-other'])
+  assert.equal(host.api.open(), 'opened')
+  assert.deepEqual(host.opened, ['s-other', 's-current'], '缺省用屏幕上的那个会话')
 })
 
 test('浏览器环境不发深链', () => {

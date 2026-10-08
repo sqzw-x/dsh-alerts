@@ -68,15 +68,53 @@ export const row = (displayTitle, extra = {}) =>
 export const currentRow = (displayTitle, extra = {}) =>
   ({ ...extra, displayTitle, retainedBy: { mainView: 1 } })
 
+/**
+ * The shipped navigation owner, with the shape that matters: `UiWorkspaceService`
+ * is a class instance whose `openSession` is a **prototype method** reaching its
+ * peer through `this`. Passed to a plugin as a detached function it throws —
+ * which is what the default `sessions` face leaves as the only option.
+ */
+export class FakeUiWorkspace {
+  constructor(opened, options = {}) {
+    this.opened = opened
+    this.throwing = options.throwing === true
+    this.lifetime = { signal: null }
+  }
+  replaceMain(target) {
+    if (this.throwing) throw new Error('navigation exploded')
+    this.opened.push(target)
+  }
+  openSession(target) {
+    this.replaceMain(target)
+  }
+}
+
+/** Older bridge that bolted navigation onto the session service; also `this`-reaching. */
+export class FakeSessions {
+  constructor(list, opened) {
+    this.list = list
+    this.opened = opened
+  }
+  open(target) {
+    this.opened.push(target)
+  }
+}
+
 /** Load the built bundle and instantiate the plugin against a fake context. */
 export function createHost(options = {}) {
   const protocol = options.protocol ?? 'dsh-app:'
   const statusStore = createStore(new Map())
   const listStore = createStore({ ids: [], byId: {} })
   const opened = []
+  // Which navigation service the host publishes: the shipped `uiWorkspace` by
+  // default, the legacy `sessions.open` on request, neither, or a failing one.
+  const navigation = options.navigation ?? 'uiWorkspace'
   const services = {
     uiSession: { sessionStatus: statusStore },
-    sessions: { list: listStore, open: (id) => opened.push(id) },
+    // The shipped `ISessions` face has no `open()`; that is why the plugin has
+    // to fall through to `uiWorkspace.openSession` in the first place.
+    sessions: navigation === 'sessions' ? new FakeSessions(listStore, opened) : { list: listStore },
+    ...(navigation === 'none' ? {} : { uiWorkspace: new FakeUiWorkspace(opened, { throwing: navigation === 'throwing' }) }),
     ...(options.services ?? {})
   }
 
@@ -180,7 +218,10 @@ export function createHost(options = {}) {
   if (loaded.id !== 'dsh-alerts') throw new Error(`unexpected module id: ${loaded.id}`)
 
   const plugin = loaded.factory()
-  const ctx = {
+  // A real cordis Context, when the caller brings one: the fake below answers
+  // `get()` from a plain map, which cannot show how the framework resolves a
+  // service the plugin never injected.
+  const ctx = options.context ?? {
     get: (name) => services[name] ?? null,
     reflect: { get: () => null },
     effect(fn) {
@@ -188,7 +229,17 @@ export function createHost(options = {}) {
       return fn()
     }
   }
-  const dispose = plugin.apply(ctx)
+  if (options.context) options.setup?.(ctx, { statusStore, listStore, sandbox })
+  // Registering through cordis is what applies `inject` and owns the teardown;
+  // the fake context takes the plugin's own returned disposer instead.
+  const fiber = options.context
+    ? ctx.plugin({ name: 'dsh-alerts', inject: plugin.inject, apply: plugin.apply })
+    : null
+  const dispose = fiber === null ? plugin.apply(ctx) : () => void fiber.dispose()
+  // A cordis fiber activates on its own schedule, so `apply` may not have run
+  // when this function returns; awaiting `ready` is how a real-context test
+  // waits for the plugin to be up.
+  const readiness = fiber === null ? Promise.resolve() : Promise.resolve(fiber).then(() => undefined)
 
   return {
     module: plugin,
@@ -201,6 +252,8 @@ export function createHost(options = {}) {
     get api() {
       return sandbox.__dshAlerts
     },
+    /** Resolves once the plugin is applied (a cordis fiber activates asynchronously). */
+    ready: readiness,
     notifications: () => FakeNotification.instances,
     last: () => FakeNotification.instances.at(-1),
     setFocus(next) {

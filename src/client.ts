@@ -30,12 +30,18 @@ interface Observable<T> {
   subscribe(listener: () => void): () => void
 }
 
+/** Switch the UI to one conversation. */
+type OpenSession = (sessionId: SessionId) => void
+
+/** Where a navigation callable came from; `'none'` means this host cannot switch. */
+type NavigationSource = 'sessions.open' | 'uiWorkspace.openSession' | 'none'
+
 /** Services the plugin reads, all resolved lazily so a bare host cannot throw. */
 interface HostServices {
   sessionStatus?: Observable<unknown>
   sessionList?: Observable<unknown>
   locale?: { getSnapshot?: () => { active?: string } }
-  openSession?: (sessionId: SessionId) => void
+  openSession?: OpenSession
 }
 
 /** Runtime surface published as `window.__dshAlerts`. */
@@ -44,6 +50,8 @@ interface RuntimeApi {
   configure(patch: Partial<AlertConfig>): AlertConfig
   debug(): Record<string, unknown>
   test(kind?: 'attention' | 'done'): string
+  /** Switch to a conversation the way a notification click does. */
+  open(sessionId?: SessionId): string
 }
 
 function isObservable(value: unknown): value is Observable<unknown> {
@@ -51,7 +59,17 @@ function isObservable(value: unknown): value is Observable<unknown> {
   return !!candidate && typeof candidate.getSnapshot === 'function' && typeof candidate.subscribe === 'function'
 }
 
-/** Optional platform services hanging off a cordis context. */
+/**
+ * Services the plugin must wait for before it applies.
+ *
+ * Only `uiSession` is required, because it carries the store the engine watches.
+ * `uiWorkspace` — the navigation owner a notification click needs — is
+ * deliberately *not* listed: this half is supposed to keep working on a host
+ * that lacks it (an older shell, a bare page), and `ctx.get()` reads a service
+ * without the inject requirement anyway. `resolveNavigation()` reports which one
+ * a click actually found. The module-level edge that gets the bundle loaded is
+ * `dsh.client.inject` in package.json.
+ */
 export const inject = ['uiSession']
 
 /**
@@ -77,26 +95,48 @@ export function apply(ctx: Context): () => void {
 
 function start(ctx: { get(name: string): unknown }): () => void {
   const config = readConfig()
-  const win = window as unknown as Window & typeof globalThis
   const disposers: Array<() => void> = []
   let disposed = false
   let engine: AlertEngine
 
+  /**
+   * Resolve the host service that switches conversations, and where it came from.
+   *
+   * Two candidates, in the order the host is expected to publish them:
+   * `sessions.open` (older bridges that bolted navigation onto the session
+   * service) and `uiWorkspace.openSession` (the shipped navigation owner).
+   *
+   * Both are **prototype methods on service instances**, so the resolved
+   * callable is bound to its instance. Handing out a detached method loses its
+   * receiver: `uiWorkspace.openSession` then throws on `this.replaceMain(...)`,
+   * which is exactly how a click on a notification used to navigate nowhere.
+   */
+  function resolveNavigation(): { source: NavigationSource; open?: OpenSession } {
+    try {
+      const sessions = ctx.get('sessions') as { open?: unknown } | null
+      if (typeof sessions?.open === 'function') {
+        return { source: 'sessions.open', open: (sessions.open as OpenSession).bind(sessions) }
+      }
+      const uiWorkspace = ctx.get('uiWorkspace') as { openSession?: unknown } | null
+      if (typeof uiWorkspace?.openSession === 'function') {
+        return {
+          source: 'uiWorkspace.openSession',
+          open: (uiWorkspace.openSession as OpenSession).bind(uiWorkspace)
+        }
+      }
+    } catch { /* a host that publishes neither simply cannot navigate */ }
+    return { source: 'none' }
+  }
+
   const services = (): HostServices => {
     const uiSession = ctx.get('uiSession') as { sessionStatus?: unknown } | null
-    const sessions = ctx.get('sessions') as { list?: unknown; open?: unknown } | null
-    const uiWorkspace = ctx.get('uiWorkspace') as { openSession?: unknown } | null
+    const sessions = ctx.get('sessions') as { list?: unknown } | null
     const locale = ctx.get('locale') as HostServices['locale'] | null
-    const open = typeof sessions?.open === 'function'
-      ? (sessions.open as HostServices['openSession'])
-      : typeof uiWorkspace?.openSession === 'function'
-        ? (uiWorkspace.openSession as HostServices['openSession'])
-        : undefined
     return {
       sessionStatus: uiSession?.sessionStatus as Observable<unknown> | undefined,
       sessionList: sessions?.list as Observable<unknown> | undefined,
       locale: locale ?? undefined,
-      openSession: open
+      openSession: resolveNavigation().open
     }
   }
 
@@ -120,7 +160,7 @@ function start(ctx: { get(name: string): unknown }): () => void {
   // ── delivery ────────────────────────────────────────────────────────────
   /** Posted notifications still on screen, with the conversation each one is about. */
   const live: Array<{ alert: Alert; notification: Notification }> = []
-  const counters = { attention: 0, done: 0, withheld: 0, clicked: 0, dismissed: 0 }
+  const counters = { attention: 0, done: 0, clicked: 0, failed: 0, dismissed: 0 }
 
   const isDesktopShell = (): boolean => location.protocol === 'dsh-app:'
 
@@ -145,6 +185,30 @@ function start(ctx: { get(name: string): unknown }): () => void {
     } catch { /* a failed raise must never break the click */ }
   }
 
+  /**
+   * Switch to the conversation an alert is about — the other half of a click.
+   *
+   * The service is resolved per call (the host may publish it after this plugin
+   * binds) and a failure is *reported*, not swallowed: a click that brings the
+   * window forward without switching the conversation is a bug, and a silent
+   * `catch` is what let it hide. `debug().counters.failed` counts these.
+   */
+  function openSession(sessionId: SessionId): boolean {
+    const { source, open } = resolveNavigation()
+    if (!open) {
+      console.warn('[dsh-alerts] this host publishes no navigation service (sessions.open / uiWorkspace.openSession)')
+      return false
+    }
+    try {
+      open(sessionId)
+      return true
+    } catch (error) {
+      counters.failed += 1
+      console.warn(`[dsh-alerts] ${source} could not switch to session ${sessionId}:`, error)
+      return false
+    }
+  }
+
   function post(alert: Alert): boolean {
     let notification: Notification
     try {
@@ -161,7 +225,7 @@ function start(ctx: { get(name: string): unknown }): () => void {
     notification.onclick = () => {
       counters.clicked += 1
       raiseWindow()
-      try { services().openSession?.(alert.sessionId) } catch { /* navigation is best effort */ }
+      openSession(alert.sessionId)
       try { notification.close() } catch { /* already gone */ }
       // Coming back through the notification reads the conversation too: anything
       // still on screen for it (an older tag, a race with the click) goes away.
@@ -302,6 +366,9 @@ function start(ctx: { get(name: string): unknown }): () => void {
         focused: windowHasFocus(),
         language: resolvedLanguage(),
         desktopShell: isDesktopShell(),
+        // Which host service a notification click would navigate through:
+        // `'none'` explains a click that raises the window but switches nothing.
+        navigation: resolveNavigation().source,
         config: { ...config },
         counters: { ...counters },
         ...engine.snapshot()
@@ -311,6 +378,11 @@ function start(ctx: { get(name: string): unknown }): () => void {
       const sessionId = engine.currentSessionId() ?? ('test' as SessionId)
       const alert = engine.forced(kind, sessionId)
       return post(alert) ? 'sent' : `not sent (permission=${permission()})`
+    },
+    open(sessionId) {
+      const target = sessionId ?? engine.currentSessionId()
+      if (target === null) return 'no session to open'
+      return openSession(target) ? 'opened' : `not opened (navigation=${resolveNavigation().source}, see console)`
     }
   }
   ;(window as unknown as { __dshAlerts?: RuntimeApi }).__dshAlerts = api

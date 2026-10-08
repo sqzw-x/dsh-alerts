@@ -60,9 +60,17 @@ dsh plugin --profile desktop add file:/absolute/path/to/dsh-alerts
 ```js
 __dshAlerts.configure({ sound: true })   // 打开提示音
 __dshAlerts.configure({ enabled: false }) // 暂时全关
-__dshAlerts.debug()                       // 当前会话、未送达的等待、计数器、权限、焦点
+__dshAlerts.debug()                       // 当前会话、未送达的等待、计数器、权限、焦点、走哪条导航
 __dshAlerts.test()                        // 绕过规则立刻发一条，验证通道
+__dshAlerts.open('session-id')            // 按 id 切会话（缺省切当前会话），验证点击路径
 ```
+
+`debug()` 里两个字段专门用来查"点了没反应"：
+
+- `navigation` — 点击时会用哪个服务切会话：`uiWorkspace.openSession` / `sessions.open` / `none`。
+- `counters.failed` — 导航调用抛错的次数；失败同时会往控制台打一条 `[dsh-alerts] …` 警告。
+
+每发出一条通知，插件还会在 `window` 上派发一个 `dsh-alerts:alert` 事件（`event.detail` 就是那条 alert：`kind` / `sessionId` / `title` / `body` / `tag`），想接自己的提醒方式（闪任务栏、换个声音、记日志）从这里挂即可。
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
@@ -85,11 +93,12 @@ __dshAlerts.test()                        // 绕过规则立刻发一条，验�
 - **等你操作**：某个会话出现了 `pendingInteraction`（审批 / 方案确认 / 提问）。按请求 `key` 去重，同一个请求只提醒一次。
 - **回复完成**：某个会话的 `running` 从 `true` 落到 `false`，且没有紧接着的等待（停下来等你输入算"等你操作"，不算"完成"）。
 
-规则判定集中在 `src/engine.ts` 的 `allows()` 里，全部是纯逻辑、不碰 DOM，因此可以脱离浏览器单测。点击通知会唤起窗口（桌面端走 `dsh://open` 深链，浏览器端 `window.focus()`）并切到对应的会话；手动回去的路子（窗口重新获得焦点、手动切会话）和它走同一个收尾：关掉该会话的通知。没回去过的通知不会自己消失，展示时长仍由系统样式决定。
+规则判定集中在 `src/engine.ts` 的 `allows()` 里，全部是纯逻辑、不碰 DOM，因此可以脱离浏览器单测。点击通知会唤起窗口（桌面端走 `dsh://open` 深链，浏览器端 `window.focus()`）并切到对应的会话 —— 切会话调的是宿主的 `uiWorkspace.openSession`（老宿主上是 `sessions.open`），调用前绑好实例，失败会记进 `counters.failed` 并告警，不再像 0.2.0 那样被静默吞掉。手动回去的路子（窗口重新获得焦点、手动切会话）和它走同一个收尾：关掉该会话的通知。没回去过的通知不会自己消失，展示时长仍由系统样式决定。
 
 ## 已知限制
 
 - **Web 版未验证**：只在 DSH Desktop 上实测过，浏览器里的行为（抬窗、通知权限流程）没人验证。
+- 切会话依赖宿主的导航服务：`debug().navigation` 显示 `none` 就说明这个宿主既没有 `uiWorkspace.openSession` 也没有 `sessions.open`，点击只能抬窗。
 - 只在 DSH Web / DSH Desktop 的页面里工作；`dsh-app://` 页面注册不了 Service Worker，所以没有通知上的按钮（本插件也不需要）。
 - "屏幕上的那个对话"由 `retainedBy.mainView` 推导；宿主没有这一信息时，所有会话都按"非当前"处理（也就是都会提醒）。
 - 通知的展示样式由系统决定（macOS：系统设置 → 通知 → DeepSeek Harness）。
@@ -106,7 +115,7 @@ npm run typecheck  # tsc --noEmit
 npm test           # 构建 + node --test
 ```
 
-`lib/client.js` 是浏览器产物，包在 `window.__ModuleLoader__.load({ id, factory })` 里（与官方 `ui-*` bundle 同形），包装由 `tsdown.config.ts` 的 banner/footer 生成。测试分三层：`test/engine.test.mjs` 打规则表，`test/client.test.mjs` 把构建产物放进 vm 里按宿主的方式加载，`test/manifest.test.mjs` 盯清单与产物契约。上面说的"只在 Desktop 实测过"指的是真实使用，不是这些测试覆盖了什么。
+`lib/client.js` 是浏览器产物，包在 `window.__ModuleLoader__.load({ id, factory })` 里（与官方 `ui-*` bundle 同形），包装由 `tsdown.config.ts` 的 banner/footer 生成。测试分四层：`test/engine.test.mjs` 打规则表，`test/client.test.mjs` 把构建产物放进 vm、按真实宿主的样子造服务实例来加载，`test/host.test.mjs` 把同一个产物当真正的 cordis 插件挂在真 `Context` 上跑，`test/manifest.test.mjs` 盯清单与产物契约。上面说的"只在 Desktop 实测过"指的是真实使用，不是这些测试覆盖了什么。
 
 ## License
 
