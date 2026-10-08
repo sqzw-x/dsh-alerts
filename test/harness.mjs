@@ -57,9 +57,16 @@ export function createStore(initial) {
   }
 }
 
-/** A session-list row; `currentRow()` marks the conversation on screen. */
-export const row = (displayTitle, extra = {}) => ({ displayTitle, retainedBy: {}, ...extra })
-export const currentRow = (displayTitle, extra = {}) => row(displayTitle, { retainedBy: { mainView: 1 }, ...extra })
+/**
+ * A session-list row; `currentRow()` marks the conversation on screen.
+ *
+ * `extra` carries along the fields a real row would keep across republishes
+ * (title, origin, …); the retention field itself stays owned by the caller.
+ */
+export const row = (displayTitle, extra = {}) =>
+  ({ ...extra, displayTitle, retainedBy: {} })
+export const currentRow = (displayTitle, extra = {}) =>
+  ({ ...extra, displayTitle, retainedBy: { mainView: 1 } })
 
 /** Load the built bundle and instantiate the plugin against a fake context. */
 export function createHost(options = {}) {
@@ -218,6 +225,18 @@ export function createHost(options = {}) {
     },
     publishList(rows) {
       listStore.publish({ ids: Object.keys(rows), byId: rows })
+    },
+    /**
+     * Republish the session list with a different conversation retained by the
+     * main view — what the host does when you switch conversations by hand.
+     */
+    switchTo(sessionId) {
+      const state = listStore.getSnapshot()
+      const byId = {}
+      for (const [id, entry] of Object.entries(state.byId)) {
+        byId[id] = id === sessionId ? currentRow(entry.displayTitle, entry) : row(entry.displayTitle, entry)
+      }
+      this.publishList(byId)
     }
   }
 }

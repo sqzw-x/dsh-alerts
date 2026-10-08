@@ -100,6 +100,9 @@ function start(ctx: { get(name: string): unknown }): () => void {
     }
   }
 
+  /** Whether this window has keyboard focus; a host without the API counts as focused. */
+  const windowHasFocus = (): boolean => (typeof document.hasFocus === 'function' ? document.hasFocus() : true)
+
   const resolvedLanguage = (): 'zh' | 'en' => {
     if (config.language === 'zh' || config.language === 'en') return config.language
     const active = services().locale?.getSnapshot?.().active
@@ -109,14 +112,15 @@ function start(ctx: { get(name: string): unknown }): () => void {
 
   engine = new AlertEngine({
     config: () => config,
-    focused: () => (typeof document.hasFocus === 'function' ? document.hasFocus() : true),
+    focused: windowHasFocus,
     canNotify: () => permission() === 'granted',
     language: resolvedLanguage
   })
 
   // ── delivery ────────────────────────────────────────────────────────────
-  const live: Notification[] = []
-  const counters = { attention: 0, done: 0, withheld: 0, clicked: 0 }
+  /** Posted notifications still on screen, with the conversation each one is about. */
+  const live: Array<{ alert: Alert; notification: Notification }> = []
+  const counters = { attention: 0, done: 0, withheld: 0, clicked: 0, dismissed: 0 }
 
   const isDesktopShell = (): boolean => location.protocol === 'dsh-app:'
 
@@ -153,22 +157,52 @@ function start(ctx: { get(name: string): unknown }): () => void {
     } catch {
       return false
     }
+    const entry = { alert, notification }
     notification.onclick = () => {
       counters.clicked += 1
       raiseWindow()
       try { services().openSession?.(alert.sessionId) } catch { /* navigation is best effort */ }
       try { notification.close() } catch { /* already gone */ }
+      // Coming back through the notification reads the conversation too: anything
+      // still on screen for it (an older tag, a race with the click) goes away.
+      dismissSession(alert.sessionId)
     }
     notification.onclose = () => {
-      const index = live.indexOf(notification)
+      const index = live.indexOf(entry)
       if (index >= 0) live.splice(index, 1)
     }
-    live.push(notification)
+    live.push(entry)
     if (live.length > 20) live.splice(0, live.length - 20)
     if (config.sound) chime(alert.kind)
     if (alert.kind === 'attention') counters.attention += 1
     else counters.done += 1
     return true
+  }
+
+  /**
+   * Close the notification of a conversation you have just returned to.
+   *
+   * An alert exists to pull you into a conversation you are not looking at, so it
+   * has done its job the moment that conversation is back on screen — whether you
+   * switched to it by hand or arrived through the notification's own click. This
+   * is also the only way to clear it on macOS, where toasts stay in the
+   * Notification Center until they are explicitly closed.
+   */
+  function dismissSession(sessionId: SessionId): void {
+    for (const entry of [...live]) {
+      if (entry.alert.sessionId !== sessionId) continue
+      try { entry.notification.close() } catch { /* already gone */ }
+      const index = live.indexOf(entry)
+      if (index >= 0) live.splice(index, 1)
+      counters.dismissed += 1
+    }
+  }
+
+  /** Reading a conversation is what retires its alert; a blurred window reads nothing. */
+  function dismissCurrent(): void {
+    if (disposed || !windowHasFocus()) return
+    const current = engine.currentSessionId()
+    if (current !== null) dismissSession(current)
   }
 
   function deliver(alerts: Alert[]): void {
@@ -190,14 +224,22 @@ function start(ctx: { get(name: string): unknown }): () => void {
     const resolved = services()
     if (!statusSub && isObservable(resolved.sessionStatus)) {
       const store = resolved.sessionStatus
-      const sync = (): void => deliver(engine.onStatus(store.getSnapshot() as never))
+      const sync = (): void => {
+        deliver(engine.onStatus(store.getSnapshot() as never))
+        dismissCurrent()
+      }
       statusSub = store.subscribe(sync)
       disposers.push(() => statusSub?.())
       sync()
     }
     if (!listSub && isObservable(resolved.sessionList)) {
       const store = resolved.sessionList
-      const sync = (): void => engine.onList(store.getSnapshot() as never)
+      const sync = (): void => {
+        engine.onList(store.getSnapshot() as never)
+        // Switching conversations is the manual way back to one: the moment the
+        // one you return to becomes the one on screen, its alert is spent.
+        dismissCurrent()
+      }
       listSub = store.subscribe(sync)
       disposers.push(() => listSub?.())
       sync()
@@ -206,6 +248,9 @@ function start(ctx: { get(name: string): unknown }): () => void {
 
   /** Losing focus is what makes the on-screen conversation's wait eligible. */
   const onAway = (): void => { if (!disposed) deliver(engine.replay()) }
+
+  /** Regaining focus (or the page coming back) is the manual way back. */
+  const onBack = (): void => { if (!disposed) dismissCurrent() }
 
   const onGesture = (): void => { unlockAudio(); requestPermission() }
 
@@ -223,12 +268,18 @@ function start(ctx: { get(name: string): unknown }): () => void {
   disposers.push(() => window.clearInterval(retry))
 
   window.addEventListener('blur', onAway)
+  // `focus` is the window's own event and fires in every engine; the document
+  // listener is the fallback for hosts that only report visibility.
+  window.addEventListener('focus', onBack)
   document.addEventListener('visibilitychange', onAway)
+  document.addEventListener('visibilitychange', onBack)
   window.addEventListener('pointerdown', onGesture)
   window.addEventListener('keydown', onGesture)
   disposers.push(() => {
     window.removeEventListener('blur', onAway)
+    window.removeEventListener('focus', onBack)
     document.removeEventListener('visibilitychange', onAway)
+    document.removeEventListener('visibilitychange', onBack)
     window.removeEventListener('pointerdown', onGesture)
     window.removeEventListener('keydown', onGesture)
   })
@@ -248,7 +299,7 @@ function start(ctx: { get(name: string): unknown }): () => void {
         version: VERSION,
         bound: { sessionStatus: !!statusSub, sessionList: !!listSub },
         permission: permission(),
-        focused: document.hasFocus(),
+        focused: windowHasFocus(),
         language: resolvedLanguage(),
         desktopShell: isDesktopShell(),
         config: { ...config },

@@ -1,6 +1,6 @@
 {
   "name": "dsh-alerts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Focus-aware notifications for DeepSeek Harness: approvals, questions, plan reviews and finished replies all arrive as one kind of alert — the conversation on screen only once its window loses focus, background conversations at any time, subagent sessions never.",
   "license": "MIT",
   "type": "module",

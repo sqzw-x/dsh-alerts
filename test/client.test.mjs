@@ -116,6 +116,74 @@ test('浏览器环境不发深链', () => {
   assert.deepEqual(host.opened, ['s-other'])
 })
 
+test('手动切回窗口：当前会话的通知自动消除', () => {
+  const host = makeHost({ focused: true })
+  host.publishStatus({
+    's-current': { running: true, pendingInteraction: wait('approval:cur', 'question', 's-current') },
+    's-other': { running: false, pendingInteraction: undefined },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  host.setFocus(false)
+  host.fireWindow('blur')
+  const notification = host.last()
+  assert.equal(notification.closed, false, '失焦补弹的通知先留着')
+
+  host.setFocus(true)
+  host.fireWindow('focus')
+  assert.equal(notification.closed, true, '切回来就该收掉')
+  assert.equal(host.api.debug().counters.dismissed, 1)
+
+  // 回到这个会话不该再补弹一次
+  host.setFocus(false)
+  host.fireWindow('blur')
+  assert.equal(host.notifications().length, 1, '读过的提醒不再重放')
+})
+
+test('手动切回会话：切到哪个会话就消掉哪个的通知', () => {
+  const host = makeHost({ focused: true })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:other') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  const notification = host.last()
+  assert.equal(notification.options.tag, 'dsh-alerts:s-other', '别的会话的等待')
+  assert.equal(notification.closed, false)
+
+  host.switchTo('s-other')
+  assert.equal(host.api.debug().currentSession, 's-other')
+  assert.equal(notification.closed, true, '切过去的那个会话的通知被收掉')
+
+  host.switchTo('s-current')
+  assert.equal(host.api.debug().currentSession, 's-current')
+  assert.equal(notification.closed, true, '后来又切走，也不会把它变回未读')
+})
+
+test('窗口失焦时切到某个会话，不该顺手消掉它的通知', () => {
+  const host = makeHost({ focused: false })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:blurred') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  host.switchTo('s-other')
+  assert.equal(host.last().closed, false, '人不在窗口前，通知还得留着')
+})
+
+test('关掉总开关后切回会话：不弹也不残留', () => {
+  const host = makeHost({ focused: true })
+  host.api.configure({ enabled: false })
+  host.publishStatus({
+    's-current': { running: false, pendingInteraction: undefined },
+    's-other': { running: true, pendingInteraction: wait('approval:off') },
+    's-sub': { running: false, pendingInteraction: undefined }
+  })
+  assert.equal(host.notifications().length, 0)
+  host.switchTo('s-other')
+  host.fireWindow('focus')
+  assert.equal(host.api.debug().counters.dismissed, 0, '没有通知就别记数')
+})
+
 test('卸载：退订、摘掉运行时 API、不再弹', () => {
   const host = makeHost({ focused: false })
   assert.equal(host.effectCount, 1, '整个插件挂在一个 effect 里')
