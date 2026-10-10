@@ -183,9 +183,40 @@ test('当前会话由 mainView 保留信息推导，离开后不再是“当前�
   engine.onList(listSnapshot({ 's-a': current('A'), 's-b': row('B') }))
   assert.equal(engine.currentSessionId(), 's-a')
   engine.onList(listSnapshot({ 's-a': row('A'), 's-b': row('B') }))
-  assert.equal(engine.currentSessionId(), 's-a', '没有新的 mainView 时保持上一次的当前会话')
+  assert.equal(engine.currentSessionId(), null, '主视图松手后就没有“当前会话”了，不能粘在上一个')
   engine.onList(listSnapshot({ 's-a': row('A'), 's-b': current('B') }))
   assert.equal(engine.currentSessionId(), 's-b')
+})
+
+test('主视图释放会话后，这个会话重新开始提醒（不再被当成“当前”压着）', () => {
+  const { engine } = makeEngine({ focused: true })
+  engine.onList(listSnapshot({ 's-a': current('A'), 's-b': row('B') }))
+  seed(engine, ['s-a', 's-b'])
+  engine.onList(listSnapshot({ 's-a': row('A'), 's-b': row('B') }))
+
+  assert.equal(engine.currentSessionId(), null)
+  const alerts = engine.onStatus(status({ 's-a': { running: true, pendingInteraction: wait('approval:after-release', 'approval', 's-a') } }))
+  assert.equal(alerts.length, 1, '有焦点也不能再压着：这个会话已经不在屏幕上了')
+  assert.equal(alerts[0].body, 'A · 审批请求')
+})
+
+test('已有的当前会话还带着 mainView 时不被抢走（与上游 publishMain 一致）', () => {
+  const { engine } = makeEngine({ focused: true })
+  // s-b 先成为当前会话，且它排在 s-c 前面
+  engine.onList(listSnapshot({ 's-b': current('B') }))
+  assert.equal(engine.currentSessionId(), 's-b')
+  // 两行都带 mainView：上游保留已有的那个，字面“取第一行 / 取最后一行”都会误判
+  engine.onList(listSnapshot({ 's-b': current('B'), 's-c': current('C') }))
+  assert.equal(engine.currentSessionId(), 's-b', '已有的当前会话仍然保留 mainView，就保持不动')
+})
+
+test('上一个当前会话松手后，多个 mainView 行里取第一个（上游的后备分支）', () => {
+  const { engine } = makeEngine({ focused: true })
+  engine.onList(listSnapshot({ 's-a': current('A') }))
+  assert.equal(engine.currentSessionId(), 's-a')
+  // s-a 不再带 mainView：后备分支取第一个符合条件的行，而不是最后一个
+  engine.onList(listSnapshot({ 's-a': row('A'), 's-b': current('B'), 's-c': current('C') }))
+  assert.equal(engine.currentSessionId(), 's-b', '取第一个 mainView>0 的行')
 })
 
 test('会话消失后释放去重键，标记也随之下线', () => {
@@ -197,6 +228,45 @@ test('会话消失后释放去重键，标记也随之下线', () => {
   assert.deepEqual(engine.snapshot().trackedSessions, [])
   // 同一个 key 再次出现（极端情况）仍会被当作新等待处理
   assert.equal(engine.onStatus(status({ 's-other': { running: true, pendingInteraction: wait('approval:gone') } })).length, 1)
+})
+
+test('等待被回答后就释放去重键，账本不随会话存活而增长', () => {
+  const { engine } = makeEngine({ focused: false })
+  engine.onList(listSnapshot({ 's-other': row('别的对话') }))
+  seed(engine)
+  assert.equal(engine.onStatus(status({ 's-other': { running: true, pendingInteraction: wait('approval:answered') } })).length, 1)
+  assert.deepEqual(engine.snapshot().deliveredKeys, ['approval:answered'])
+
+  engine.onStatus(status({ 's-other': { running: true, pendingInteraction: undefined } }))
+  assert.deepEqual(engine.snapshot().deliveredKeys, [], '回答过的等待不该再把键留在账本里')
+
+  // 同一个 key 再回来时是一条新等待，照常提醒，而不是被账本吞掉
+  assert.equal(engine.onStatus(status({ 's-other': { running: true, pendingInteraction: wait('approval:answered') } })).length, 1)
+})
+
+test('等待被新请求直接替换时，旧键也要释放（宿主可以不经过“没有等待”的中间态）', () => {
+  const { engine } = makeEngine({ focused: false })
+  engine.onList(listSnapshot({ 's-other': row('别的对话') }))
+  seed(engine)
+  assert.equal(engine.onStatus(status({ 's-other': { running: true, pendingInteraction: wait('approval:first') } })).length, 1)
+  // 宿主换了 key，旧请求从未出现“消失”的快照
+  assert.equal(engine.onStatus(status({ 's-other': { running: true, pendingInteraction: wait('approval:second') } })).length, 1)
+  assert.deepEqual(engine.snapshot().deliveredKeys, ['approval:second'], '被替换掉的旧键不该留在账本里')
+})
+
+test('子代理会话从两个快照里都消失后才清理记录', () => {
+  const { engine } = makeEngine({ focused: false })
+  engine.onList(listSnapshot({ 's-sub': row('子代理步骤', { origin: 'subagent' }) }))
+  seed(engine, ['s-sub'])
+  engine.onStatus(status({ 's-sub': { running: true, pendingInteraction: wait('approval:sub', 'approval', 's-sub') } }))
+  assert.deepEqual(engine.snapshot().subagentSessions, ['s-sub'])
+
+  // 只在会话列表里消失、状态快照还认它时，先别清：清早了子代理就会开始弹提醒
+  engine.onList(listSnapshot({ 's-other': row('别的对话') }))
+  assert.deepEqual(engine.snapshot().subagentSessions, ['s-sub'])
+
+  engine.onStatus(status({ 's-other': { running: false, pendingInteraction: undefined } }))
+  assert.deepEqual(engine.snapshot().subagentSessions, [], '两个快照都没有它了，记录该清掉')
 })
 
 test('forced() 绕过规则，供测试按钮使用', () => {
