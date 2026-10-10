@@ -249,15 +249,23 @@ test('关掉总开关后切回会话：不弹也不残留', () => {
   assert.equal(host.api.debug().counters.dismissed, 0, '没有通知就别记数')
 })
 
-test('卸载：退订、摘掉运行时 API、不再弹', () => {
+test('卸载：退订、摘掉运行时 API、不再弹、清掉自己的定时器', () => {
   const host = makeHost({ focused: false })
   assert.equal(host.effectCount, 1, '整个插件挂在一个 effect 里')
   assert.equal(host.statusStore.listenerCount, 1)
   assert.equal(host.listStore.listenerCount, 1)
+  // 权限提示是 3s 后的一次性定时器；除非它被登记进清理列表，否则这里看不到
+  const permissionPrompt = host.timeouts.at(-1)
+  assert.equal(host.timeoutHandlers.at(-1)?.ms, 3000, '最后一次 setTimeout 应该是 3s 的权限提示')
   host.dispose()
   assert.equal(host.statusStore.listenerCount, 0)
   assert.equal(host.listStore.listenerCount, 0)
   assert.equal(host.api, undefined, 'window.__dshAlerts 应当被摘掉')
+  assert.ok(
+    host.clearedTimeouts.includes(permissionPrompt),
+    '卸载时要真的 clearTimeout 掉权限提示，而不是让 disposer 抛错再被兜住'
+  )
+  assert.deepEqual(host.clearedIntervals, host.intervals, '重绑轮询也要停掉')
   host.publishStatus({
     's-other': { running: true, pendingInteraction: wait('approval:late') }
   })

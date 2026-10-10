@@ -119,8 +119,19 @@ export function createHost(options = {}) {
   }
 
   const iframes = []
-  const intervals = []
+  /**
+   * Scheduled-timer bookkeeping. These hold *handle ids* (what the bundle gets
+   * back from `setTimeout` / `setInterval`), so a test can assert that teardown
+   * cleared the very timer it scheduled. One counter serves both kinds, which is
+   * what makes an id unique across them — exactly as on a real host.
+   */
   const timeouts = []
+  const intervals = []
+  const clearedTimeouts = []
+  const clearedIntervals = []
+  const timeoutHandlers = []
+  const intervalHandlers = []
+  let nextTimerId = 0
   const listeners = new Map()
   const documentListeners = new Map()
   let focused = options.focused ?? true
@@ -196,14 +207,26 @@ export function createHost(options = {}) {
       focusCalls += 1
     },
     setTimeout(fn, ms) {
-      timeouts.push({ fn, ms })
-      return timeouts.length
+      const handle = ++nextTimerId
+      timeouts.push(handle)
+      timeoutHandlers.push({ handle, fn, ms })
+      return handle
     },
     setInterval(fn, ms) {
-      intervals.push({ fn, ms })
-      return intervals.length
+      const handle = ++nextTimerId
+      intervals.push(handle)
+      intervalHandlers.push({ handle, fn, ms })
+      return handle
     },
-    clearInterval() {},
+    clearInterval(handle) {
+      clearedIntervals.push(handle)
+    },
+    // The bundle clears one-shot timers on teardown. Without this the sandbox
+    // throws inside those disposers and the per-disposer try/catch swallows it,
+    // so no test could tell whether teardown actually cleaned up.
+    clearTimeout(handle) {
+      clearedTimeouts.push(handle)
+    },
     __ModuleLoader__: {
       load(spec) {
         loaded = spec
@@ -249,6 +272,12 @@ export function createHost(options = {}) {
     listStore,
     opened,
     iframes,
+    timeouts,
+    intervals,
+    clearedTimeouts,
+    clearedIntervals,
+    timeoutHandlers,
+    intervalHandlers,
     get api() {
       return sandbox.__dshAlerts
     },
