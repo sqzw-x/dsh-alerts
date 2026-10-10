@@ -126,6 +126,9 @@ export class AlertEngine {
   private readonly lastDone = new Map<SessionId, number>()
   private readonly labels = new Map<SessionId, string>()
   private readonly subagents = new Set<SessionId>()
+  /** Session ids from the last list snapshot, so a subagent record is only dropped
+   *  once neither snapshot mentions it any more. */
+  private listIds = new Set<SessionId>()
   private currentId: SessionId | null = null
   private seeded = false
 
@@ -152,20 +155,43 @@ export class AlertEngine {
   onList(state: SessionListState | undefined | null): void {
     if (!state?.byId) return
     const rows = Object.entries(state.byId) as Array<[SessionId, SessionSummary | undefined]>
+    const ids = new Set<SessionId>()
+    let firstMain: SessionId | null = null
+    let held: SessionId | null = null
     for (const [sid, row] of rows) {
       const summary = row as
         | { displayTitle?: string; title?: string; origin?: string; retainedBy?: Record<string, number> }
         | undefined
       if (!summary) continue
+      ids.add(sid)
       this.labels.set(sid, summary.displayTitle || summary.title || String(sid))
       if (summary.origin === 'subagent') this.subagents.add(sid)
       else this.subagents.delete(sid)
       // `mainView` is the retention source the conversation view holds; on
       // hosts where the list used to carry a `current` field this is the only
       // remaining signal for "the conversation on screen".
-      if ((summary.retainedBy?.mainView ?? 0) > 0) this.currentId = sid
+      if ((summary.retainedBy?.mainView ?? 0) > 0) {
+        if (firstMain === null) firstMain = sid
+        if (sid === this.currentId) held = sid
+      }
     }
-    for (const sid of [...this.labels.keys()]) if (!(sid in state.byId)) this.labels.delete(sid)
+    // The three rules upstream `publishMain` applies, as far as a list snapshot
+    // can express them:
+    //   1. keep the session we already have while its row still holds `mainView`;
+    //   2. otherwise the FIRST row with a live `mainView` retention;
+    //   3. otherwise nothing is on screen.
+    // (This used to be a running assignment, which stuck to the last match and
+    // never let go — hence both the fallback and the clear-to-null.)
+    //
+    // The one place this cannot match upstream exactly is a held session whose
+    // row is absent from this snapshot: upstream asks the retention store, which
+    // can still hold a scope without a row, while a snapshot is all we see. The
+    // engine therefore treats "no row" as "not on screen" — the same answer it
+    // gives for a session the view has released, which is the case that matters
+    // here. Keeping an absent id instead would restore the stickiness this fixes.
+    this.currentId = held ?? firstMain
+    this.listIds = ids
+    for (const sid of [...this.labels.keys()]) if (!ids.has(sid)) this.labels.delete(sid)
   }
 
   /**
@@ -188,6 +214,15 @@ export class AlertEngine {
 
       if (pending) this.pending.set(sid, pending)
       else this.pending.delete(sid)
+
+      // "A delivered key is released as soon as it stops being *the* key for its
+      // session — answered, or replaced by a newer request; the ledger holds at
+      // most one key per session." A replacement matters too: the host may swap
+      // a pending request for a new key with the previous one never going
+      // absent, and the old key would otherwise stay in the ledger forever.
+      if (previous?.pendingKey && previous.pendingKey !== (pending ? key : null)) {
+        this.delivered.delete(previous.pendingKey)
+      }
 
       if (!this.seeded) {
         // Baseline: a wait that already existed when the plugin bound is state,
@@ -221,6 +256,10 @@ export class AlertEngine {
       this.statuses.delete(sid)
       this.pending.delete(sid)
       this.lastDone.delete(sid)
+      // Subagent records follow the session out, but only once the list snapshot
+      // has dropped it too — a row that is merely late in the status store still
+      // has to be recognised as a subagent when it arrives.
+      if (!this.listIds.has(sid)) this.subagents.delete(sid)
     }
 
     if (!this.seeded && seen.size > 0) this.seeded = true

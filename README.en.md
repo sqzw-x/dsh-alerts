@@ -61,7 +61,7 @@ Every posted notification also dispatches a `dsh-alerts:alert` event on `window`
 
 ## How it works
 
-Two read-only stores: `uiSession.sessionStatus` (`running`, `pendingInteraction`) and `sessions.list` (title, `origin: 'subagent'`, `retainedBy.mainView` = the conversation on screen). They produce the two event kinds behind rule 2: a **wait** is a pending interaction appearing (deduped by request key, so one request alerts once), and a **completion** is that session's `running` bit falling with no wait in its place — stopping to ask you something is a wait, not a completion. Every decision lives in the DOM-free `src/engine.ts`, which is unit-tested directly.
+Two read-only stores: `uiSession.sessionStatus` (`running`, `pendingInteraction`) and `sessions.list` (title, `origin: 'subagent'`, `retainedBy.mainView`). They produce the two event kinds behind rule 2: a **wait** is a pending interaction appearing (deduped by request key, so one request alerts once), and a **completion** is that session's `running` bit falling with no wait in its place — stopping to ask you something is a wait, not a completion. Every decision lives in the DOM-free `src/engine.ts`, which is unit-tested directly.
 
 Clicking a notification raises the window (the `dsh://open` deep link on the desktop, `window.focus()` in a browser) and switches to that conversation through the host's `uiWorkspace.openSession` (`sessions.open` on older hosts), bound to its instance before the call; a failure is counted in `counters.failed` and warned about instead of being swallowed the way 0.2.0 swallowed it; the manual ways back (the window regaining focus, switching conversations by hand) end in the same place — the conversation's notification is closed. Notifications you never return to are not auto-closed; the platform style decides how long they stay.
 
@@ -70,13 +70,15 @@ Clicking a notification raises the window (the `dsh://open` deep link on the des
 - **The Web build is unverified**: only DSH Desktop has been tested; browser behaviour (raising the window, the permission flow) has not been checked by anyone.
 - Switching conversations needs a host navigation service: `debug().navigation` reading `none` means the host publishes neither `uiWorkspace.openSession` nor `sessions.open`, and a click can only raise the window.
 - Works inside DSH Web / DSH Desktop pages only; `dsh-app://` pages cannot register a Service Worker, so notifications carry no buttons (this plugin needs none).
-- "The conversation on screen" is derived from `retainedBy.mainView`; where the host does not publish it, every conversation counts as "not current" (and therefore alerts).
+- "The conversation on screen" is derived from `retainedBy.mainView`, which is a **reference count the main view holds** (upstream's own comment: "Local ownership counts, independent of catalog membership and never persisted"), read with the same predicate upstream `isMain()` uses. Where the host does not publish it, every conversation counts as "not current" (and therefore alerts).
 - Notification presentation is up to the platform (macOS: System Settings → Notifications → DeepSeek Harness).
 - A denied permission means no notifications; `__dshAlerts.debug().permission` reports `denied`.
+- **Completions are detected from the `running` edge, not from the SDK's `completionUnread`.** The latter is the sidebar's unread dot: upstream clears it while the main view holds the session and as soon as `running` turns true, so using it as the "reply finished" signal would silently stop background-completion alerts. The trade-off is that a reply finishing before the client ever observes `running === true` (say, across a page reload) does not alert.
+- `dsh.compatibility.dshReleases` in `package.json` is **informational only**: nothing in DSH 0.2.0-rc.2 reads it. The real gate is `peerDependencies` on `@deepseek-ai/dsh*` — this package declares `@deepseek-ai/cordis`, whose prefix is not checked, so that peer is inert, exactly as in upstream packages like `dsh-client-ui-session`.
 
 ## Development
 
-Node 22+ (toolchain only — the shipped bundle runs in the browser).
+Node 22.18+ (toolchain only: tsdown requires `^22.18.0 || ^24.11.0 || >=26.0.0` and CI runs 22/24 — the shipped bundle runs in the browser and does not care about the Node version).
 
 ```sh
 npm install && npm test
