@@ -17,6 +17,21 @@ import { VERSION } from './version.ts'
 /** Config key in `localStorage`. */
 const CONFIG_KEY = 'dshAlerts.config'
 
+/**
+ * Internal cadence constants. These are timing details of *how* the plugin
+ * binds, not deployment knobs: no host choice depends on their value, so they
+ * stay out of `AlertConfig` rather than growing the user-facing surface.
+ */
+
+/** Retry cadence for binding the stores the soft `sessions` dependency owns. */
+const REBIND_INTERVAL_MS = 1500
+
+/** Grace period before asking for notification permission, so boot is not interrupted. */
+const PERMISSION_PROMPT_DELAY_MS = 3000
+
+/** How long the hidden raise-window iframe stays in the DOM before removal. */
+const RAISE_FRAME_LIFETIME_MS = 4000
+
 const DEFAULTS: AlertConfig = {
   enabled: true,
   ignoreSubagent: true,
@@ -33,7 +48,15 @@ interface Observable<T> {
 /** Switch the UI to one conversation. */
 type OpenSession = (sessionId: SessionId) => void
 
-/** Where a navigation callable came from; `'none'` means this host cannot switch. */
+/**
+ * Where a navigation callable came from; `'none'` means this host cannot switch.
+ *
+ * `'sessions.open'` is legacy-host support, not a path the shipped SDK offers:
+ * `ISessions` is `list` + `retain`/`using` with no `open()`, and its own doc
+ * says "navigation belongs to view owners". So on 0.2.0-rc.2 that branch never
+ * fires and a click always uses `'uiWorkspace.openSession'`. It stays — with a
+ * test — for shells that still expose one.
+ */
 type NavigationSource = 'sessions.open' | 'uiWorkspace.openSession' | 'none'
 
 /** Services the plugin reads, all resolved lazily so a bare host cannot throw. */
@@ -47,7 +70,7 @@ interface HostServices {
 /** Runtime surface published as `window.__dshAlerts`. */
 interface RuntimeApi {
   version: string
-  configure(patch: Partial<AlertConfig>): AlertConfig
+  configure(patch: Partial<AlertConfig> | null | undefined): AlertConfig
   debug(): Record<string, unknown>
   test(kind?: 'attention' | 'done'): string
   /** Switch to a conversation the way a notification click does. */
@@ -160,6 +183,12 @@ function start(ctx: { get(name: string): unknown }): () => void {
   // ── delivery ────────────────────────────────────────────────────────────
   /** Posted notifications still on screen, with the conversation each one is about. */
   const live: Array<{ alert: Alert; notification: Notification }> = []
+  /**
+   * Pending removals of the raise-window iframes. A raise is a side effect, so
+   * its timer belongs to the plugin's lifetime: without this the handle is lost
+   * and teardown leaves the timeout queued.
+   */
+  const frameTimers = new Set<number>()
   const counters = { attention: 0, done: 0, clicked: 0, failed: 0, dismissed: 0 }
 
   const isDesktopShell = (): boolean => location.protocol === 'dsh-app:'
@@ -181,7 +210,11 @@ function start(ctx: { get(name: string): unknown }): () => void {
       frame.style.cssText = 'position:fixed;left:-10px;top:-10px;width:0;height:0;border:0;visibility:hidden'
       frame.src = 'dsh://open'
       ;(document.body ?? document.documentElement).appendChild(frame)
-      window.setTimeout(() => frame.remove(), 4000)
+      const timer = window.setTimeout(() => {
+        frameTimers.delete(timer)
+        frame.remove()
+      }, RAISE_FRAME_LIFETIME_MS)
+      frameTimers.add(timer)
     } catch { /* a failed raise must never break the click */ }
   }
 
@@ -319,6 +352,7 @@ function start(ctx: { get(name: string): unknown }): () => void {
   const onGesture = (): void => { unlockAudio(); requestPermission() }
 
   function requestPermission(): void {
+    if (disposed) return
     try {
       if (!('Notification' in window)) return
       if (Notification.permission === 'default') void Notification.requestPermission().catch(() => undefined)
@@ -328,7 +362,7 @@ function start(ctx: { get(name: string): unknown }): () => void {
   bind()
   // The uiSession / sessions entries may activate after this one; retry cheaply
   // instead of gating activation on them.
-  const retry = window.setInterval(bind, 1500)
+  const retry = window.setInterval(bind, REBIND_INTERVAL_MS)
   disposers.push(() => window.clearInterval(retry))
 
   window.addEventListener('blur', onAway)
@@ -347,7 +381,12 @@ function start(ctx: { get(name: string): unknown }): () => void {
     window.removeEventListener('pointerdown', onGesture)
     window.removeEventListener('keydown', onGesture)
   })
-  window.setTimeout(requestPermission, 3000)
+  const permissionPrompt = window.setTimeout(requestPermission, PERMISSION_PROMPT_DELAY_MS)
+  disposers.push(() => window.clearTimeout(permissionPrompt))
+  disposers.push(() => {
+    for (const timer of frameTimers) window.clearTimeout(timer)
+    frameTimers.clear()
+  })
 
   // ── runtime API ─────────────────────────────────────────────────────────
   const api: RuntimeApi = {
@@ -409,8 +448,12 @@ function readConfig(): AlertConfig {
   return { ...DEFAULTS, ...sanitize(stored) }
 }
 
-function sanitize(patch: Partial<AlertConfig>): Partial<AlertConfig> {
+function sanitize(patch: Partial<AlertConfig> | null | undefined): Partial<AlertConfig> {
   const clean: Partial<AlertConfig> = {}
+  // The public `configure()` surface is reachable by hand, and `readConfig()`
+  // feeds it whatever `JSON.parse` returned — which can be a scalar or `null`
+  // for a corrupt entry, even though the parameter type says otherwise.
+  if (typeof patch !== 'object' || patch === null) return clean
   if (typeof patch.enabled === 'boolean') clean.enabled = patch.enabled
   if (typeof patch.ignoreSubagent === 'boolean') clean.ignoreSubagent = patch.ignoreSubagent
   if (typeof patch.sound === 'boolean') clean.sound = patch.sound
